@@ -104,7 +104,7 @@
  */
 #define	VSLIST_HEAD(name, type)						\
 struct name {								\
-	struct type *vslh_first;	/* first element */		\
+	struct type *vslh_first __attribute__((__may_alias__));	/* first element */		\
 }
 
 #define	VSLIST_HEAD_INITIALIZER(head)					\
@@ -112,7 +112,7 @@ struct name {								\
 
 #define	VSLIST_ENTRY(type)						\
 struct {								\
-	struct type *vsle_next;	/* next element */			\
+	struct type *vsle_next __attribute__((__may_alias__));	/* next element */			\
 }
 
 /*
