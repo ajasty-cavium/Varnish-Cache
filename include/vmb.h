@@ -72,6 +72,12 @@
 #define VWMB()	VMB()
 #define VRMB()	VMB()
 
+#elif defined(__aarch64__)
+
+#define VMB() __asm __volatile("dmb ish");
+#define VWMB() __asm __volatile("dmb ish");
+#define VRMB() __asm __volatile("dmb ish");
+
 #else
 
 #define VMB_NEEDS_PTHREAD_WORKAROUND_THIS_IS_BAD_FOR_PERFORMANCE 1
