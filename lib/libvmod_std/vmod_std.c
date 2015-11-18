@@ -149,6 +149,80 @@ vmod_log(struct sess *sp, const char *fmt, ...)
 		WSP(sp, SLT_VCL_Log, "%s", buf);
 }
 
+typedef struct syslog_q_t
+{
+       char *str;
+       int len, fac;
+       struct syslog_q_t *next;
+} syslog_q;
+
+pthread_mutex_t syslock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond;
+syslog_q *head, *tail;
+int running = 1, sysq_initialized = 0;
+pthread_t thread;
+
+void *syslog_thread(void *arg)
+{
+       int err;
+       while (running) {
+               pthread_mutex_lock(&syslock);
+		if (!head) err = pthread_cond_wait(&cond, &syslock);
+		else err = 0;
+               if (err == 0) {
+                       syslog_q *q = head;
+	               head = head->next;
+                       if (!head) tail = NULL;
+                       pthread_mutex_unlock(&syslock);
+                       syslog(q->fac, "%s", q->str);
+			free(q);
+               } else {
+                       pthread_mutex_unlock(&syslock);
+               }
+       }
+       return NULL;
+}
+
+void x_syslog_init(void)
+{
+       int initd = __atomic_fetch_add(&sysq_initialized, 1, __ATOMIC_SEQ_CST);
+       if (initd) return;
+
+       pthread_mutex_init(&syslock, NULL);
+       pthread_cond_init(&cond, NULL);
+
+       head = tail = NULL;
+
+       pthread_create(&thread, NULL, &syslog_thread, NULL);
+}
+
+void x_syslog(int fac, const char *str)
+{
+       if (sysq_initialized == 0) x_syslog_init();
+
+	int len = strlen(str);
+
+       syslog_q *sq = (syslog_q*) malloc(sizeof(struct syslog_q_t) + len + 1);
+       sq->str = ((char *) sq) + sizeof(struct syslog_q_t);
+       sq->len = len;
+       sq->fac = fac;
+       sq->next = NULL;
+       memcpy(sq->str, str, len + 1);
+
+       pthread_mutex_lock(&syslock);
+       if (!tail) {
+               head = tail = sq;
+               pthread_cond_signal(&cond);
+               pthread_mutex_unlock(&syslock);
+               return;
+       }
+       tail->next = sq;
+       tail = sq;
+       pthread_cond_signal(&cond);
+       pthread_mutex_unlock(&syslock);
+}
+
+
 void
 vmod_syslog(struct sess *sp, int fac, const char *fmt, ...)
 {
@@ -160,7 +234,7 @@ vmod_syslog(struct sess *sp, int fac, const char *fmt, ...)
 	p = VRT_StringList(buf, sizeof buf, fmt, ap);
 	va_end(ap);
 	if (p != NULL)
-		syslog(fac, "%s", buf);
+		x_syslog((int)fac, buf);
 }
 
 const char * __match_proto__()
