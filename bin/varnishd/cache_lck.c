@@ -67,14 +67,24 @@ Lck__Lock(struct lock *lck, const char *p, const char *f, int l)
 
 	CAST_OBJ_NOTNULL(ilck, lck->priv, ILCK_MAGIC);
 	if (!(params->diag_bitmap & 0x18)) {
-		AZ(pthread_mutex_lock(&ilck->mtx));
+		do {
+			r = pthread_mutex_trylock(&ilck->mtx);
+			if (r != 0) {
+				struct timespec ts;
+				ts.tv_sec = 0;
+				ts.tv_nsec = 1;
+				nanosleep(&ts, NULL);
+			}
+		} while (r != 0);
 		AZ(ilck->held);
 		ilck->stat->locks++;
 		ilck->owner = pthread_self();
 		ilck->held = 1;
 		return;
 	}
-	r = pthread_mutex_trylock(&ilck->mtx);
+	do {
+		r = pthread_mutex_trylock(&ilck->mtx);
+	} while (r != 0);
 	assert(r == 0 || r == EBUSY);
 	if (r) {
 		ilck->stat->colls++;
