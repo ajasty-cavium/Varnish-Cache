@@ -96,7 +96,8 @@ HSH_Prealloc(const struct sess *sp)
 		XXXAN(oh);
 		oh->refcnt = 1;
 		VTAILQ_INIT(&oh->objcs);
-		Lck_New(&oh->mtx, lck_objhdr);
+		//Lck_New(&oh->mtx, lck_objhdr);
+		RWLck_Init(&oh->mtx);
 		w->nobjhead = oh;
 		w->stats.n_objecthead++;
 	}
@@ -130,7 +131,7 @@ HSH_Cleanup(struct worker *w)
 		w->nobjcore = NULL;
 	}
 	if (w->nobjhead != NULL) {
-		Lck_Delete(&w->nobjhead->mtx);
+		//Lck_Delete(&w->nobjhead->mtx);
 		FREE_OBJ(w->nobjhead);
 		w->nobjhead = NULL;
 		w->stats.n_objecthead--;
@@ -157,7 +158,7 @@ HSH_DeleteObjHead(struct worker *w, struct objhead *oh)
 
 	AZ(oh->refcnt);
 	assert(VTAILQ_EMPTY(&oh->objcs));
-	Lck_Delete(&oh->mtx);
+	//Lck_Delete(&oh->mtx);
 	w->stats.n_objecthead--;
 	FREE_OBJ(oh);
 }
@@ -281,7 +282,7 @@ HSH_Insert(const struct sess *sp)
 	CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
 	if (oh == w->nobjhead)
 		w->nobjhead = NULL;
-	Lck_Lock(&oh->mtx);
+	RWLck_WLock(&oh->mtx);
 	assert(oh->refcnt > 0);
 
 	/* Insert (precreated) objcore in objecthead */
@@ -294,7 +295,7 @@ HSH_Insert(const struct sess *sp)
 	VTAILQ_INSERT_HEAD(&oh->objcs, oc, list);
 	/* NB: do not deref objhead the new object inherits our reference */
 	oc->objhead = oh;
-	Lck_Unlock(&oh->mtx);
+	RWLck_WUnlock(&oh->mtx);
 	sp->wrk->stats.n_vampireobject++;
 	return (oc);
 }
@@ -340,7 +341,7 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 	}
 
 	CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
-	Lck_Lock(&oh->mtx);
+	RWLck_RLock(&oh->mtx);
 	assert(oh->refcnt > 0);
 	busy_oc = NULL;
 	grace_oc = NULL;
@@ -424,7 +425,7 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 		if (o->hits < INT_MAX)
 			o->hits++;
 		assert(oh->refcnt > 1);
-		Lck_Unlock(&oh->mtx);
+		RWLck_RUnlock(&oh->mtx);
 		assert(hash->deref(oh));
 		*poh = oh;
 		return (oc);
@@ -452,7 +453,7 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 		 */
 		sp->hash_objhead = oh;
 		sp->wrk = NULL;
-		Lck_Unlock(&oh->mtx);
+		RWLck_RUnlock(&oh->mtx);
 		return (NULL);
 	}
 
@@ -478,7 +479,7 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 	VTAILQ_INSERT_TAIL(&oh->objcs, oc, list);
 	oc->objhead = oh;
 	/* NB: do not deref objhead the new object inherits our reference */
-	Lck_Unlock(&oh->mtx);
+	RWLck_RUnlock(&oh->mtx);
 	*poh = oh;
 	return (oc);
 }
@@ -495,7 +496,7 @@ hsh_rush(struct dstat *ds, struct objhead *oh)
 
 	AN(ds);
 	CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
-	Lck_AssertHeld(&oh->mtx);
+	//Lck_AssertHeld(&oh->mtx);
 	wl = oh->waitinglist;
 	CHECK_OBJ_NOTNULL(wl, WAITINGLIST_MAGIC);
 	for (u = 0; u < params->rush_exponent; u++) {
@@ -536,7 +537,7 @@ HSH_Purge(const struct sess *sp, struct objhead *oh, double ttl, double grace)
 	CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
 	spc = WS_Reserve(sp->wrk->ws, 0);
 	ocp = (void*)sp->wrk->ws->f;
-	Lck_Lock(&oh->mtx);
+	RWLck_WLock(&oh->mtx);
 	assert(oh->refcnt > 0);
 	nobj = 0;
 	VTAILQ_FOREACH(oc, &oh->objcs, list) {
@@ -559,7 +560,7 @@ HSH_Purge(const struct sess *sp, struct objhead *oh, double ttl, double grace)
 		spc -= sizeof *ocp;
 		ocp[nobj++] = oc;
 	}
-	Lck_Unlock(&oh->mtx);
+	RWLck_WUnlock(&oh->mtx);
 
 	/* NB: inverse test to catch NAN also */
 	if (!(ttl > 0.))
@@ -629,7 +630,7 @@ HSH_Unbusy(const struct sess *sp)
 		    "Object %u workspace free %u", o->xid, WS_Free(o->ws_o));
 
 	/* XXX: pretouch neighbors on oh->objcs to prevent page-on under mtx */
-	Lck_Lock(&oh->mtx);
+	RWLck_WLock(&oh->mtx);
 	assert(oh->refcnt > 0);
 	/* XXX: strictly speaking, we should sort in Date: order. */
 	VTAILQ_REMOVE(&oh->objcs, oc, list);
@@ -641,7 +642,7 @@ HSH_Unbusy(const struct sess *sp)
 	if (oh->waitinglist != NULL)
 		hsh_rush(&sp->wrk->stats, oh);
 	AN(oc->ban);
-	Lck_Unlock(&oh->mtx);
+	RWLck_WUnlock(&oh->mtx);
 	assert(oc_getobj(sp->wrk, oc) == o);
 }
 
@@ -653,10 +654,10 @@ HSH_Ref(struct objcore *oc)
 	CHECK_OBJ_NOTNULL(oc, OBJCORE_MAGIC);
 	oh = oc->objhead;
 	CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
-	Lck_Lock(&oh->mtx);
+	RWLck_WLock(&oh->mtx);
 	assert(oc->refcnt > 0);
 	oc->refcnt++;
-	Lck_Unlock(&oh->mtx);
+	RWLck_WUnlock(&oh->mtx);
 }
 
 /*--------------------------------------------------------------------
@@ -706,7 +707,7 @@ HSH_Deref(struct worker *w, struct objcore *oc, struct object **oo)
 	oh = oc->objhead;
 	CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
 
-	Lck_Lock(&oh->mtx);
+	RWLck_WLock(&oh->mtx);
 	assert(oh->refcnt > 0);
 	assert(oc->refcnt > 0);
 	r = --oc->refcnt;
@@ -718,7 +719,7 @@ HSH_Deref(struct worker *w, struct objcore *oc, struct object **oo)
 	}
 	if (oh->waitinglist != NULL)
 		hsh_rush(&w->stats, oh);
-	Lck_Unlock(&oh->mtx);
+	RWLck_WUnlock(&oh->mtx);
 	if (r != 0)
 		return (r);
 

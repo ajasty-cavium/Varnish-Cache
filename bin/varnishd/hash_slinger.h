@@ -28,6 +28,7 @@
  *
  */
 
+#include "rwlock.h"
 struct sess;
 struct worker;
 struct object;
@@ -76,7 +77,8 @@ struct objhead {
 #define OBJHEAD_MAGIC		0x1b96615d
 
 	int			refcnt;
-	struct lock		mtx;
+	//struct lock		mtx;
+	rwlock			mtx;
 	VTAILQ_HEAD(,objcore)	objcs;
 	unsigned char		digest[DIGEST_LEN];
 	struct waitinglist	*waitinglist;

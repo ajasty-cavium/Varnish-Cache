@@ -825,8 +825,8 @@ ban_lurker_work(const struct sess *sp, unsigned pass)
 				break;
 			oh = oc->objhead;
 			CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
-			if (Lck_Trylock(&oh->mtx)) {
-				Lck_Unlock(&ban_mtx);
+			if (1) { RWLck_WLock(&oh->mtx);
+				RWLck_WUnlock(&ban_mtx);
 				TIM_sleep(params->ban_lurker_sleep);
 				continue;
 			}
@@ -839,7 +839,7 @@ ban_lurker_work(const struct sess *sp, unsigned pass)
 				if (oc == oc2)
 					break;
 			if (oc2 == NULL) {
-				Lck_Unlock(&oh->mtx);
+				RWLck_WUnlock(&oh->mtx);
 				Lck_Unlock(&ban_mtx);
 				TIM_sleep(params->ban_lurker_sleep);
 				continue;
@@ -856,7 +856,7 @@ ban_lurker_work(const struct sess *sp, unsigned pass)
 				oc->flags |= pass;
 				VTAILQ_REMOVE(&b->objcore, oc, ban_list);
 				VTAILQ_INSERT_TAIL(&b->objcore, oc, ban_list);
-				Lck_Unlock(&oh->mtx);
+				RWLck_WUnlock(&oh->mtx);
 				Lck_Unlock(&ban_mtx);
 				continue;
 			}
@@ -883,7 +883,7 @@ ban_lurker_work(const struct sess *sp, unsigned pass)
 				VTAILQ_INSERT_TAIL(&b->objcore, oc, ban_list);
 				Lck_Unlock(&ban_mtx);
 			}
-			Lck_Unlock(&oh->mtx);
+			RWLck_WUnlock(&oh->mtx);
 			if (params->diag_bitmap & 0x80000)
 				VSL(SLT_Debug, 0, "lurker done: %p %d %d",
 				    oc, oc->flags & OC_F_LURK, pass);
