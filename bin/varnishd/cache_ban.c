@@ -826,7 +826,7 @@ ban_lurker_work(const struct sess *sp, unsigned pass)
 			oh = oc->objhead;
 			CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
 			if (1) { RWLck_WLock(&oh->mtx);
-				RWLck_WUnlock(&ban_mtx);
+				Lck_Unlock(&ban_mtx);
 				TIM_sleep(params->ban_lurker_sleep);
 				continue;
 			}

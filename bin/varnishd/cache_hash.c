@@ -341,7 +341,7 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 	}
 
 	CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
-	RWLck_RLock(&oh->mtx);
+	RWLck_WLock(&oh->mtx);
 	assert(oh->refcnt > 0);
 	busy_oc = NULL;
 	grace_oc = NULL;
@@ -425,7 +425,7 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 		if (o->hits < INT_MAX)
 			o->hits++;
 		assert(oh->refcnt > 1);
-		RWLck_RUnlock(&oh->mtx);
+		RWLck_WUnlock(&oh->mtx);
 		assert(hash->deref(oh));
 		*poh = oh;
 		return (oc);
@@ -453,7 +453,7 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 		 */
 		sp->hash_objhead = oh;
 		sp->wrk = NULL;
-		RWLck_RUnlock(&oh->mtx);
+		RWLck_WUnlock(&oh->mtx);
 		return (NULL);
 	}
 
@@ -479,7 +479,7 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 	VTAILQ_INSERT_TAIL(&oh->objcs, oc, list);
 	oc->objhead = oh;
 	/* NB: do not deref objhead the new object inherits our reference */
-	RWLck_RUnlock(&oh->mtx);
+	RWLck_WUnlock(&oh->mtx);
 	*poh = oh;
 	return (oc);
 }
