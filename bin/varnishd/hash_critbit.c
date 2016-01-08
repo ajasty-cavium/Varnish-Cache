@@ -396,18 +396,21 @@ hcb_deref(struct objhead *oh)
 
 	r = 1;
 	CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
-	RWLck_WLock(&oh->mtx);
+	RWLck_RLock(&oh->mtx);
 	assert(oh->refcnt > 0);
 	oh->refcnt--;
 	if (oh->refcnt == 0) {
+		RWLck_WPromote(&oh->mtx);
 		Lck_Lock(&hcb_mtx);
 		hcb_delete(&hcb_root, oh);
 		VTAILQ_INSERT_TAIL(&cool_h, oh, hoh_list);
 		Lck_Unlock(&hcb_mtx);
 		assert(VTAILQ_EMPTY(&oh->objcs));
 		AZ(oh->waitinglist);
+		RWLck_WUnlock(&oh->mtx);
+		return (r);
 	}
-	RWLck_WUnlock(&oh->mtx);
+	RWLck_RUnlock(&oh->mtx);
 #ifdef PHK
 	fprintf(stderr, "hcb_defef %d %d <%s>\n", __LINE__, r, oh->hash);
 #endif
@@ -454,7 +457,7 @@ hcb_lookup(const struct sess *sp, struct objhead *noh)
 		}
 
 		CHECK_OBJ_NOTNULL(noh, OBJHEAD_MAGIC);
-		RWLck_WLock(&oh->mtx);
+		RWLck_RLock(&oh->mtx);
 		/*
 		 * A refcount of zero indicates that the tree changed
 		 * under us, so fall through and try with the lock held.
@@ -464,7 +467,7 @@ hcb_lookup(const struct sess *sp, struct objhead *noh)
 			oh->refcnt++;
 		else
 			with_lock = 1;
-		RWLck_WUnlock(&oh->mtx);
+		RWLck_RUnlock(&oh->mtx);
 		if (u > 0)
 			return (oh);
 	}

@@ -48,24 +48,21 @@ RWLck_RLock(rwlock *lck)
 	/* If wlock taken, back out and retry */
 	if (!rl.wlock) return;
 
-	__atomic_fetch_add(&lck->rlock, -1, __ATOMIC_SEQ_CST);
+	fetch_add(&lck->u64, -1);
     }
 }
 
 static void
 RWLck_RUnlock(rwlock *lck)
 {
-    //__atomic_sub_fetch(&lck->u64, 1, __ATOMIC_SEQ_CST);
     fetch_add(&lck->u64, -1);
 }
 
 static void
 RWLck_WLock(rwlock *lck)
 {
-    uint32_t exp = 0;
-
     /* Keep trying to get lock */
-    while (!__atomic_compare_exchange_n(&lck->wlock, &exp, 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+    while (__atomic_exchange_n(&lck->wlock, 1, __ATOMIC_SEQ_CST) == 1);
 
     /* Wait for readers to drain */
     while (lck->rlock);
@@ -75,6 +72,16 @@ static void
 RWLck_WUnlock(rwlock *lck)
 {
     __atomic_store_n(&lck->wlock, 0, __ATOMIC_SEQ_CST);
+}
+
+static void
+RWLck_WPromote(rwlock *lck)
+{
+    while (__atomic_exchange_n(&lck->wlock, 1, __ATOMIC_SEQ_CST) == 1);
+
+    fetch_add(&lck->u64, -1);
+
+    while (lck->rlock);
 }
 
 #endif
