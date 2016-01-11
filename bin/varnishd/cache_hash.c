@@ -312,6 +312,7 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 	struct objcore *busy_oc, *grace_oc;
 	struct object *o;
 	double grace_ttl;
+	int lost_lock = 1;
 
 	CHECK_OBJ_NOTNULL(sp, SESS_MAGIC);
 	CHECK_OBJ_NOTNULL(sp->wrk, WORKER_MAGIC);
@@ -340,57 +341,67 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 			w->nobjhead = NULL;
 	}
 
-	CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
-	RWLck_RLock(&oh->mtx);
-	assert(oh->refcnt > 0);
-	busy_oc = NULL;
-	grace_oc = NULL;
-	grace_ttl = NAN;
-	VTAILQ_FOREACH(oc, &oh->objcs, list) {
-		/* Must be at least our own ref + the objcore we examine */
-		assert(oh->refcnt > 1);
-		CHECK_OBJ_NOTNULL(oc, OBJCORE_MAGIC);
-		assert(oc->objhead == oh);
+	while(lost_lock) {
+	    CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
+	    RWLck_RLock(&oh->mtx);
+	    assert(oh->refcnt > 0);
+	    busy_oc = NULL;
+	    grace_oc = NULL;
+	    grace_ttl = NAN;
 
-		if (oc->flags & OC_F_BUSY) {
-			CHECK_OBJ_NOTNULL(oc->busyobj, BUSYOBJ_MAGIC);
-			if (sp->hash_ignore_busy || sp->hash_always_miss)
-				continue;
+	    VTAILQ_FOREACH(oc, &oh->objcs, list) {
+		    __builtin_prefetch(VTAILQ_NEXT(oc, list));
+		    /* Must be at least our own ref + the objcore we examine */
+		    assert(oh->refcnt > 1);
+		    CHECK_OBJ_NOTNULL(oc, OBJCORE_MAGIC);
+		    assert(oc->objhead == oh);
 
-			if (oc->busyobj->vary != NULL &&
-			    !VRY_Match(sp, oc->busyobj->vary))
-				continue;
+		    if (oc->flags & OC_F_BUSY) {
+			    CHECK_OBJ_NOTNULL(oc->busyobj, BUSYOBJ_MAGIC);
+			    if (sp->hash_ignore_busy || sp->hash_always_miss)
+				    continue;
 
-			busy_oc = oc;
-			continue;
-		}
+			    if (oc->busyobj->vary != NULL &&
+				!VRY_Match(sp, oc->busyobj->vary))
+				    continue;
 
-		o = oc_getobj(sp->wrk, oc);
-		CHECK_OBJ_NOTNULL(o, OBJECT_MAGIC);
+			    busy_oc = oc;
+			    continue;
+		    }
 
-		if (o->exp.ttl <= 0.)
-			continue;
-		if (BAN_CheckObject(o, sp))
-			continue;
-		if (o->vary != NULL && !VRY_Match(sp, o->vary))
-			continue;
+		    o = oc_getobj(sp->wrk, oc);
+		    CHECK_OBJ_NOTNULL(o, OBJECT_MAGIC);
 
-		/* If still valid, use it */
-		if (EXP_Ttl(sp, o) >= sp->t_req)
-			break;
+		    if (o->exp.ttl <= 0.)
+			    continue;
+		    if (BAN_CheckObject(o, sp))
+			    continue;
+		    if (o->vary != NULL && !VRY_Match(sp, o->vary))
+			    continue;
 
-		/*
-		 * Remember any matching objects inside their grace period
-		 * and if there are several, use the least expired one.
-		 */
-		if (EXP_Grace(sp, o) >= sp->t_req) {
-			if (grace_oc == NULL ||
-			    grace_ttl < o->exp.entered + o->exp.ttl) {
-				grace_oc = oc;
-				grace_ttl = o->exp.entered + o->exp.ttl;
-			}
-		}
+		    /* If still valid, use it */
+		    if (EXP_Ttl(sp, o) >= sp->t_req)
+			    break;
+
+		    /*
+		     * Remember any matching objects inside their grace period
+		     * and if there are several, use the least expired one.
+		     */
+		    if (EXP_Grace(sp, o) >= sp->t_req) {
+			    if (grace_oc == NULL ||
+				grace_ttl < o->exp.entered + o->exp.ttl) {
+				    grace_oc = oc;
+				    grace_ttl = o->exp.entered + o->exp.ttl;
+			    }
+		    }
+	    }
+	    lost_lock = !RWLck_WPromote(&oh->mtx);
+	    if (lost_lock) {
+		RWLck_RUnlock(&oh->mtx);
+		continue;
+	    }
 	}
+
 
 	/*
 	 * If we have seen a busy object or the backend is unhealthy, and
@@ -425,13 +436,11 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 		if (o->hits < INT_MAX)
 			o->hits++;
 		assert(oh->refcnt > 1);
-		RWLck_RUnlock(&oh->mtx);
+		RWLck_WUnlock(&oh->mtx);
 		assert(hash->deref(oh));
 		*poh = oh;
 		return (oc);
 	}
-	/* Promote to write-lock */
-	RWLck_WPromote(&oh->mtx);
 
 	if (busy_oc != NULL) {
 		/* There are one or more busy objects, wait for them */
@@ -656,10 +665,10 @@ HSH_Ref(struct objcore *oc)
 	CHECK_OBJ_NOTNULL(oc, OBJCORE_MAGIC);
 	oh = oc->objhead;
 	CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
-	RWLck_RLock(&oh->mtx);
+	RWLck_WLock(&oh->mtx);
 	assert(oc->refcnt > 0);
 	oc->refcnt++;
-	RWLck_RUnlock(&oh->mtx);
+	RWLck_WUnlock(&oh->mtx);
 }
 
 /*--------------------------------------------------------------------
@@ -709,12 +718,11 @@ HSH_Deref(struct worker *w, struct objcore *oc, struct object **oo)
 	oh = oc->objhead;
 	CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
 
-	RWLck_RLock(&oh->mtx);
+	RWLck_WLock(&oh->mtx);
 	assert(oh->refcnt > 0);
 	assert(oc->refcnt > 0);
 	r = --oc->refcnt;
 	if (!r) {
-		RWLck_WPromote(&oh->mtx);
 		VTAILQ_REMOVE(&oh->objcs, oc, list);
 	} else {
 		/* Must have an object */
@@ -722,8 +730,7 @@ HSH_Deref(struct worker *w, struct objcore *oc, struct object **oo)
 	}
 	if (oh->waitinglist != NULL)
 		hsh_rush(&w->stats, oh);
-	if (r) RWLck_RUnlock(&oh->mtx);
-	else RWLck_WUnlock(&oh->mtx);
+	RWLck_WUnlock(&oh->mtx);
 	if (r != 0)
 		return (r);
 
