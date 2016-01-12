@@ -39,8 +39,9 @@
 #include "hash_slinger.h"
 #include "cli_priv.h"
 #include "vmb.h"
+#include "rwlock.h"
 
-static struct lock hcb_mtx;
+static rwlock hcb_lck;
 
 /*---------------------------------------------------------------------
  * Table for finding out how many bits two bytes have in common,
@@ -363,10 +364,10 @@ hcb_cleaner(void *priv)
 			VTAILQ_REMOVE(&dead_h, oh, hoh_list);
 			HSH_DeleteObjHead(&ww, oh);
 		}
-		Lck_Lock(&hcb_mtx);
+		RWLck_WLock(&hcb_lck);
 		VSTAILQ_CONCAT(&dead_y, &cool_y);
 		VTAILQ_CONCAT(&dead_h, &cool_h, hoh_list);
-		Lck_Unlock(&hcb_mtx);
+		RWLck_WUnlock(&hcb_lck);
 		WRK_SumStat(&ww);
 		TIM_sleep(params->critbit_cooloff);
 	}
@@ -383,7 +384,7 @@ hcb_start(void)
 
 	(void)oh;
 	CLI_AddFuncs(hcb_cmds);
-	Lck_New(&hcb_mtx, lck_hcb);
+	RWLck_Init(&hcb_lck);
 	AZ(pthread_create(&tp, NULL, hcb_cleaner, NULL));
 	memset(&hcb_root, 0, sizeof hcb_root);
 	hcb_build_bittbl();
@@ -400,10 +401,10 @@ hcb_deref(struct objhead *oh)
 	assert(oh->refcnt > 0);
 	oh->refcnt--;
 	if (oh->refcnt == 0) {
-		Lck_Lock(&hcb_mtx);
+		RWLck_WLock(&hcb_lck);
 		hcb_delete(&hcb_root, oh);
 		VTAILQ_INSERT_TAIL(&cool_h, oh, hoh_list);
-		Lck_Unlock(&hcb_mtx);
+		RWLck_WUnlock(&hcb_lck);
 		assert(VTAILQ_EMPTY(&oh->objcs));
 		AZ(oh->waitinglist);
 	}
@@ -428,11 +429,11 @@ hcb_lookup(const struct sess *sp, struct objhead *noh)
 	while (1) {
 		if (with_lock) {
 			CAST_OBJ_NOTNULL(y, sp->wrk->nhashpriv, HCB_Y_MAGIC);
-			Lck_Lock(&hcb_mtx);
+			RWLck_WLock(&hcb_lck);
 			VSC_C_main->hcb_lock++;
 			assert(noh->refcnt == 1);
 			oh = hcb_insert(sp->wrk, &hcb_root, noh, 1);
-			Lck_Unlock(&hcb_mtx);
+			RWLck_WUnlock(&hcb_lck);
 		} else {
 			VSC_C_main->hcb_nolock++;
 			oh = hcb_insert(sp->wrk, &hcb_root, noh, 0);

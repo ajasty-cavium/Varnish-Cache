@@ -18,7 +18,7 @@ static inline uint64_t fetch_add(volatile uint64_t *u64, int64_t i)
     return tmp + i;
 }
 
-static inline uint32_t swp(uint32_t *u32, uint32_t v)
+static inline uint32_t swp(volatile uint32_t *u32, uint32_t v)
 {
     register uint32_t tmp;
     asm volatile (".cpu generic+lse\n"
@@ -83,6 +83,7 @@ static void
 RWLck_WLock(rwlock *lck)
 {
     /* Keep trying to get lock */
+    //while (swp(&lck->wlock, 1)) pthread_yield();
     while (__atomic_exchange_n(&lck->wlock, 1, __ATOMIC_SEQ_CST) == 1) pthread_yield();
 
     /* Wait for readers to drain */
@@ -99,6 +100,7 @@ static int
 RWLck_WPromote(rwlock *lck)
 {
     if (__atomic_exchange_n(&lck->wlock, 1, __ATOMIC_SEQ_CST) == 1) return 0;
+    //if (swp(&lck->wlock, 1) == 1) return 0;
 
     fetch_add(&lck->u64, -1);
 
