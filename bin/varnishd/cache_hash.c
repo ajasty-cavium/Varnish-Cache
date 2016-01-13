@@ -96,7 +96,6 @@ HSH_Prealloc(const struct sess *sp)
 		XXXAN(oh);
 		oh->refcnt = 1;
 		VTAILQ_INIT(&oh->objcs);
-		//Lck_New(&oh->mtx, lck_objhdr);
 		RWLck_Init(&oh->mtx);
 		w->nobjhead = oh;
 		w->stats.n_objecthead++;
@@ -131,7 +130,6 @@ HSH_Cleanup(struct worker *w)
 		w->nobjcore = NULL;
 	}
 	if (w->nobjhead != NULL) {
-		//Lck_Delete(&w->nobjhead->mtx);
 		FREE_OBJ(w->nobjhead);
 		w->nobjhead = NULL;
 		w->stats.n_objecthead--;
@@ -158,7 +156,6 @@ HSH_DeleteObjHead(struct worker *w, struct objhead *oh)
 
 	AZ(oh->refcnt);
 	assert(VTAILQ_EMPTY(&oh->objcs));
-	//Lck_Delete(&oh->mtx);
 	w->stats.n_objecthead--;
 	FREE_OBJ(oh);
 }
@@ -343,7 +340,7 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 
 	while(lost_lock) {
 	    CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
-	    RWLck_RLock(&oh->mtx);
+	    RWLck_WLock(&oh->mtx);
 	    assert(oh->refcnt > 0);
 	    busy_oc = NULL;
 	    grace_oc = NULL;
@@ -395,11 +392,14 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 			    }
 		    }
 	    }
+	    lost_lock = 0;
+#if 0
 	    lost_lock = !RWLck_WPromote(&oh->mtx);
 	    if (lost_lock) {
 		RWLck_RUnlock(&oh->mtx);
 		continue;
 	    }
+#endif
 	}
 
 
@@ -507,7 +507,6 @@ hsh_rush(struct dstat *ds, struct objhead *oh)
 
 	AN(ds);
 	CHECK_OBJ_NOTNULL(oh, OBJHEAD_MAGIC);
-	//Lck_AssertHeld(&oh->mtx);
 	wl = oh->waitinglist;
 	CHECK_OBJ_NOTNULL(wl, WAITINGLIST_MAGIC);
 	for (u = 0; u < params->rush_exponent; u++) {

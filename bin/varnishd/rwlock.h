@@ -2,12 +2,19 @@
 #ifndef __RWLOCK_H__
 #define __RWLOCK_H__
 
+#include <sys/syscall.h>
+#include <assert.h>
+
+#define DUMPL(x) dumpl(x,__LINE__)
+
+#define YIELD_THRESH 8
+
 static inline void wmb()
 {
     asm volatile ("dmb ish\n" ::: "memory");
 }
 
-static inline uint64_t fetch_add(volatile uint64_t *u64, int64_t i)
+static inline uint64_t fetch_add64(volatile uint64_t *u64, int64_t i)
 {
     uint64_t tmp;
     asm volatile (".cpu generic+lse\n"
@@ -18,13 +25,24 @@ static inline uint64_t fetch_add(volatile uint64_t *u64, int64_t i)
     return tmp + i;
 }
 
+static inline uint32_t fetch_add32(volatile uint32_t *u32, int32_t i)
+{
+    uint32_t tmp;
+    asm volatile (".cpu generic+lse\n"
+		  "ldaddal %w[i], %w[tmp], %[v]\n"
+		  : [tmp]"=&r"(tmp), [v]"+Q"(*u32)
+		  : [i]"r"(i)
+		  : "memory");
+    return tmp + i;
+}
+
 static inline uint32_t swp(volatile uint32_t *u32, uint32_t v)
 {
     register uint32_t tmp;
     asm volatile (".cpu generic+lse\n"
-		  "swpal %w[i], %w[tmp], %[v]\n"
-		  : [tmp]"=&r"(tmp), [v]"+Q"(*u32)
-		  : [i]"r"(v)
+		  "swpal %w[v], %w[tmp], %[p]\n"
+		  : [tmp]"=r"(tmp), [p]"+Q"(*u32)
+		  : [v]"r"(v)
 		  : "memory");
     return tmp;
 }
@@ -37,21 +55,47 @@ swait(int ival)
 	asm volatile ("sub %w[i], %w[i], #1\n"
 		: [i]"=&r"(w0));
 }
-
-typedef union rwlock_t {
-    volatile uint64_t u64;
+typedef union wrlock_t {
     struct {
-	volatile uint32_t rlock;
-	volatile uint32_t wlock;
+        volatile uint32_t wserving;
+	volatile uint32_t wticket;
     };
+    volatile uint64_t u64;
+} wrlock;
+
+typedef struct rwlock_t {
+    wrlock w;
+    volatile uint64_t readers;
+    volatile pid_t owner;
 } rwlock;
 
 static void
 RWLck_Init(rwlock *lck)
 {
-    wmb();
-    lck->u64 = 0;
-    wmb();
+    __atomic_store_n(&lck->readers, 0ull, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&lck->w.u64, 0ull, __ATOMIC_SEQ_CST);
+}
+
+static uint32_t
+RWLck_WCount(rwlock *lck)
+{
+    wrlock wr;
+
+    wr.u64 = lck->w.u64;
+    return wr.wticket - wr.wserving;
+}
+
+static void dumpl(rwlock *rwl, int line)
+{
+#if 0
+    fprintf(stderr, "l %u= %lu-%u/%u %u.\n", line, rwl->readers, rwl->w.wserving, 
+	    rwl->w.wticket, RWLck_WCount(rwl));
+#endif
+}
+
+static pid_t gettid()
+{
+    return syscall(SYS_gettid);
 }
 
 static void
@@ -59,52 +103,72 @@ RWLck_RLock(rwlock *lck)
 {
     while(1) {
 	rwlock rl;
+	int count;
 
 	/* Wait for free */
-	while (lck->wlock) pthread_yield();
+	while ((count = RWLck_WCount(lck)) > 0)
+	    if (count > YIELD_THRESH)
+		pthread_yield();
 
 	/* Take read-lock */
-	rl.u64 = fetch_add(&lck->u64, 1);
+	rl.readers = fetch_add64(&lck->readers, 1);
 
 	/* If wlock taken, back out and retry */
-	if (!rl.wlock) return;
+	if (RWLck_WCount(lck) == 0) return;
 
-	fetch_add(&lck->u64, -1);
+	fetch_add64(&lck->readers, -1);
     }
 }
 
 static void
 RWLck_RUnlock(rwlock *lck)
 {
-    fetch_add(&lck->u64, -1);
+    fetch_add64(&lck->readers, -1);
 }
 
 static void
 RWLck_WLock(rwlock *lck)
 {
+    DUMPL(lck);
     /* Keep trying to get lock */
-    //while (swp(&lck->wlock, 1)) pthread_yield();
-    while (__atomic_exchange_n(&lck->wlock, 1, __ATOMIC_SEQ_CST) == 1) pthread_yield();
+    while (RWLck_WCount(lck) > 0);
+    uint32_t tick = fetch_add32(&lck->w.wticket, 1) - 1, tc;
+    while ((tc = (tick - lck->w.wserving)) > 0) {
+	DUMPL(lck);
+	/* If we're too far behind, yield */
+	if ((tick - lck->w.wserving) > YIELD_THRESH) pthread_yield();
+    }
 
     /* Wait for readers to drain */
-    while (lck->rlock);
+    while (lck->readers);
+    lck->owner = gettid();
 }
 
 static void
 RWLck_WUnlock(rwlock *lck)
 {
-    __atomic_store_n(&lck->wlock, 0, __ATOMIC_SEQ_CST);
+    //assert(lck->w.wticket > lck->w.wserving);
+    if (lck->owner != gettid()) abort();
+    fetch_add32(&lck->w.wserving, 1);
 }
 
 static int
 RWLck_WPromote(rwlock *lck)
 {
-    if (__atomic_exchange_n(&lck->wlock, 1, __ATOMIC_SEQ_CST) == 1) return 0;
-    //if (swp(&lck->wlock, 1) == 1) return 0;
+    do {
+	wrlock wr = lck->w, wr2 = lck->w;
+	if (wr.wticket != wr.wserving) return 0;
+	wr.wticket++;
+	DUMPL(lck);
+	if (__atomic_compare_exchange_n(&lck->w.u64, (uint64_t*)&wr2.u64, wr.u64, 0, 
+		    __ATOMIC_SEQ_CST, __ATOMIC_RELAXED))
+	    break;
+    } while (1);
 
-    fetch_add(&lck->u64, -1);
+    fetch_add64(&lck->readers, -1);
 
-    while (lck->rlock);
+    while (lck->readers);
+    lck->owner = gettid();
 
     return 1;
 }
